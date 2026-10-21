@@ -6,8 +6,14 @@
 // Optional capture rules: removing captured stones can reopen five-in-a-row
 // lines, which the incremental updates cannot express, so after a capture the
 // line values, weights and capture arrays are rebuilt from the board using the
-// same scoring. The weights do not yet account for capture opportunities.
+// same scoring.
+//
+// With capture rules on, the computer also keeps a parallel set of capture
+// weights (cw) and plays the empty point with the highest w + cw. The original
+// weights w are never changed by this, so games without captures play exactly
+// as before.
 #include "pente_engine.h"
+#include <algorithm>
 
 namespace
 {
@@ -430,9 +436,130 @@ namespace
 		num_cs();
 	}
 
+	// ---------------------------------------------------------------
+	// Capture weights, from the computer's point of view.
+
+	int cw[N2];                          // capture weight of each point
+	bool use_capture_weights = true;     // tests switch this off to compare
+
+	const int CW_WIN_CAPTURE = 100001;   // takes the fifth pair: wins like completing five
+	const int CW_BLOCK_WIN = 2000;       // stops the human taking their fifth pair
+	const int CW_CAPTURE = 300;          // per pair taken
+	const int CW_BLOCK = 250;            // per own pair saved from capture
+	const int CW_PER_CAPTURE = 50;       // added per pair the player already holds
+	const int CW_THREAT = 30;            // sets up X O O _ (a capture threat)
+	const int CW_EXPOSE = 300;           // forms own pair open to capture (O X X _)
+	const int CW_EXPOSE_LOSS = 5000;     // ... when that pair would be the human's fifth
+
+	const int OFF_BOARD = 2;
+
+	int stone_at(int x, int y)
+	{
+		return (x < 0 || x >= N || y < 0 || y >= N) ? OFF_BOARD : p[y*N + x];
+	}
+
+	// Strongest line through stone s that belongs only to `owner`, valued on the
+	// updat_w scale: what capturing s would break up (or losing it would cost).
+	int line_value(int s, int owner)
+	{
+		int best = 0;
+		for (int k=1;k<=t[s][0];k++)
+		{
+			int v = sn[t[s][k]-1] * owner;   // stones of `owner` in an unblocked line
+			if (v < 0 || v > 5) continue;
+			int value = owner == pente::Human
+				? (v >= 4 ? 1500 : v == 3 ? 50 : v == 2 ? 26 : 0)    // breaking the human's line
+				: (v >= 3 ? 100 : v == 2 ? 30 : 0);                  // keeping the computer's line
+			if (value > best) best = value;
+		}
+		return best;
+	}
+
+	void capture_weight(int q)
+	{
+		static const int dirs[8][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} };
+		const int C = pente::Computer, H = pente::Human;
+		int x = q%N, y = q/N;
+		int take = 0, save = 0, threats = 0, exposed = 0;
+		int takeLine = 0, saveLine = 0;
+		for (const auto& d : dirs)
+		{
+			int s1 = stone_at(x + d[0], y + d[1]);
+			int s2 = stone_at(x + 2*d[0], y + 2*d[1]);
+			int s3 = stone_at(x + 3*d[0], y + 3*d[1]);
+			int back = stone_at(x - d[0], y - d[1]);
+			if (s1 == H && s2 == H && s3 == C)          // computer captures here
+			{
+				take++;
+				int i1 = (y + d[1])*N + x + d[0], i2 = (y + 2*d[1])*N + x + 2*d[0];
+				takeLine = std::max(takeLine, std::max(line_value(i1, H), line_value(i2, H)));
+			}
+			if (s1 == C && s2 == C && s3 == H)          // human would capture here
+			{
+				save++;
+				int i1 = (y + d[1])*N + x + d[0], i2 = (y + 2*d[1])*N + x + 2*d[0];
+				saveLine = std::max(saveLine, std::max(line_value(i1, C), line_value(i2, C)));
+			}
+			if (s1 == H && s2 == H && s3 == 0)          // threatens a capture next move
+				threats++;
+			if (s1 == C && ((back == H && s2 == 0) || (back == 0 && s2 == H)))
+				exposed++;                              // makes an O X X _ shape
+		}
+
+		int value = 0;
+		if (take)
+		{
+			if (captures_c + take >= pente::CapturesToWin) value += CW_WIN_CAPTURE;
+			else value += take * (CW_CAPTURE + CW_PER_CAPTURE * captures_c) + takeLine;
+		}
+		if (save)
+		{
+			if (captures_h + save >= pente::CapturesToWin) value += CW_BLOCK_WIN;
+			else value += save * (CW_BLOCK + CW_PER_CAPTURE * captures_h) + saveLine;
+		}
+		value += threats * CW_THREAT;
+		if (exposed)
+		{
+			if (captures_h + 1 >= pente::CapturesToWin) value -= CW_EXPOSE_LOSS;
+			else value -= exposed * (CW_EXPOSE + CW_PER_CAPTURE * captures_h);
+		}
+		cw[q] = value;
+	}
+
+	void update_capture_weights()
+	{
+		for (int i=0;i<N2;i++)
+		{
+			if (capture_rules && use_capture_weights && p[i] == 0) capture_weight(i);
+			else cw[i] = 0;
+		}
+	}
+
+	// The weight the computer chooses by: w alone without capture rules, else
+	// w + cw, kept at 1 or more so every empty point stays playable.
+	int total_weight(int i)
+	{
+		if (p[i]) return 0;
+		if (!capture_rules || !use_capture_weights) return w[i];
+		return std::max(1, w[i] + cw[i]);
+	}
+
+	// selec_pt over the combined weights (same tie-break: lowest point wins).
+	int choose_pt()
+	{
+		if (!capture_rules || !use_capture_weights) return selec_pt();
+		int maxw = 0, maxi = -1;
+		for (int i=0;i<N2;i++)
+		{
+			int j = total_weight(i);
+			if (j > maxw) { maxi = i; maxw = j; }
+		}
+		return maxi + 1;
+	}
+
 	// One move, as performed by both branches of the original main loop,
 	// plus captures when they are enabled.
-	void place(int pt, int mplayer)
+	void place_stone(int pt, int mplayer)
 	{
 		p[pt-1] = mplayer;
 		w[pt-1] = 0;
@@ -463,6 +590,12 @@ namespace
 		}
 	}
 
+	void place(int pt, int mplayer)
+	{
+		place_stone(pt, mplayer);
+		update_capture_weights();
+	}
+
 	void clear_state()
 	{
 		for (int i=0;i<N2;i++)
@@ -486,6 +619,7 @@ namespace
 		init_w();
 		init_cp();
 		init_ct();
+		for (int i=0;i<N2;i++) cw[i] = 0;
 	}
 
 	bool in_range(int row, int col) { return row >= 0 && row < N && col >= 0 && col < N; }
@@ -513,7 +647,7 @@ namespace pente
 	bool ComputerMove(int& row, int& col)
 	{
 		if (status != InProgress) return false;
-		int pt = selec_pt();
+		int pt = choose_pt();
 		if (pt == 0)
 		{
 			status = Tie;
@@ -555,7 +689,9 @@ namespace pente
 	bool WonByCaptures() { return won_by_captures; }
 	int Captures(Owner who) { return who == Computer ? captures_c : who == Human ? captures_h : 0; }
 
-	int Weight(int row, int col) { return in_range(row, col) ? w[row*N + col] : 0; }
+	int Weight(int row, int col) { return in_range(row, col) ? total_weight(row*N + col) : 0; }
+	int LineWeight(int row, int col) { return in_range(row, col) && !p[row*N + col] ? w[row*N + col] : 0; }
+	int CaptureWeight(int row, int col) { return in_range(row, col) ? cw[row*N + col] : 0; }
 
 	int RemainingSolutions()
 	{
