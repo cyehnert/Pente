@@ -523,7 +523,16 @@ namespace
 		{
 			pointInfo = L"Point: " + PointName(g_hoverRow, g_hoverCol);
 			if (g_showHints && pente::Cell(g_hoverRow, g_hoverCol) == pente::Empty)
-				pointInfo += L"   computer weight " + std::to_wstring(pente::Weight(g_hoverRow, g_hoverCol));
+			{
+				int row = g_hoverRow, col = g_hoverCol;
+				pointInfo += L"   weight " + std::to_wstring(pente::Weight(row, col));
+				if (pente::CaptureRules())
+				{
+					int cw = pente::CaptureWeight(row, col);
+					pointInfo += L" = " + std::to_wstring(pente::LineWeight(row, col)) + (cw < 0 ? L" − " : L" + ") + std::to_wstring(std::abs(cw));
+					if (pente::LineWeight(row, col) + cw < 1) pointInfo += L" (min 1)";
+				}
+			}
 		}
 		DrawText(g, pointInfo, RectF(sc.X, sc.Y + 2 * lh, sc.Width, lh), S(13), FontStyleRegular, dim);
 

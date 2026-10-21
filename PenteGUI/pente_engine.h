@@ -58,8 +58,12 @@ namespace pente
 	bool WonByCaptures();
 	int Captures(Owner who);       // pairs captured so far by this player
 
-	// The computer's current evaluation of an empty point (0 for occupied points).
+	// The computer's evaluation of an empty point (0 for occupied points): the
+	// line weight, plus the capture weight when capture rules are on. The
+	// computer plays the point with the highest Weight.
 	int Weight(int row, int col);
+	int LineWeight(int row, int col);     // the original five-in-a-row weight
+	int CaptureWeight(int row, int col);  // capture bonus/penalty (0 without capture rules)
 
 	int RemainingSolutions();      // five-in-a-row lines still open to someone
 	int ComputerCaptureThreats();  // capture opportunities currently open to the computer
