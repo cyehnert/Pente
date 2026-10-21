@@ -13,18 +13,30 @@
 namespace pente
 {
 	const int N = 13;
+	const int CapturesToWin = 5;   // captured pairs needed to win when capture rules are on
 
 	enum Owner { Empty = 0, Human = -1, Computer = 1 };
 	enum Result { InProgress = 0, ComputerWins, HumanWins, Tie };
+
+	struct Point
+	{
+		int row;
+		int col;
+	};
 
 	struct Move
 	{
 		int row;
 		int col;
 		Owner who;
+		std::vector<Point> captured;   // opponent stones removed by this move
 	};
 
-	void Reset();
+	// Start a new game. With capture rules, a move that brackets exactly two
+	// opponent stones in a line (X O O X) removes them, and capturing
+	// CapturesToWin pairs wins the game.
+	void Reset(bool captureRules);
+	bool CaptureRules();
 
 	// Place a human stone. Returns false if the point is occupied or the game is over.
 	bool HumanMove(int row, int col);
@@ -40,8 +52,11 @@ namespace pente
 	Result Status();
 	const std::vector<Move>& History();
 
-	// Fills the five points of the winning row. Returns false if nobody has won.
+	// Fills the five points of the winning row. Returns false if nobody has won
+	// by five in a row.
 	bool WinningLine(int rows[5], int cols[5]);
+	bool WonByCaptures();
+	int Captures(Owner who);       // pairs captured so far by this player
 
 	// The computer's current evaluation of an empty point (0 for occupied points).
 	int Weight(int row, int col);

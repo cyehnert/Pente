@@ -2,6 +2,11 @@
 // console menu removed. The evaluation routines (init_*, eval_s, eval_w,
 // updat_w, selec_pt, updat_cs, cp_check, num_cs) are unchanged apart from
 // living in an unnamed namespace, so the computer plays exactly as before.
+//
+// Optional capture rules: removing captured stones can reopen five-in-a-row
+// lines, which the incremental updates cannot express, so after a capture the
+// line values, weights and capture arrays are rebuilt from the board using the
+// same scoring. The weights do not yet account for capture opportunities.
 #include "pente_engine.h"
 
 namespace
@@ -22,6 +27,11 @@ namespace
 	                        // 0 = no capture, 1 = computer capture, -1 = human capture
 	int ncapt_h;
 	int ncapt_c;
+
+	bool capture_rules;
+	int captures_h;         // pairs captured by the human
+	int captures_c;         // pairs captured by the computer
+	bool won_by_captures;
 
 	pente::Result status;
 	int win_sol;            // index into a[] of the winning quint, or -1
@@ -372,18 +382,85 @@ namespace
 		}
 	}
 
-	// One move, as performed by both branches of the original main loop.
+	// Remove opponent pairs bracketed by the stone just placed at pt (X O O X
+	// along any of the 8 directions). Only the moving player captures; placing a
+	// stone between two enemy stones is safe.
+	void take_captures(int pt, int mplayer, std::vector<pente::Point>& captured)
+	{
+		static const int dirs[8][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} };
+		int x = (pt-1)%N, y = (pt-1)/N;
+		for (const auto& d : dirs)
+		{
+			int x3 = x + 3*d[0], y3 = y + 3*d[1];
+			if (x3 < 0 || x3 >= N || y3 < 0 || y3 >= N) continue;
+			int i1 = (y + d[1])*N + x + d[0];
+			int i2 = (y + 2*d[1])*N + x + 2*d[0];
+			int i3 = y3*N + x3;
+			if (p[i1] == -mplayer && p[i2] == -mplayer && p[i3] == mplayer)
+			{
+				p[i1] = 0;
+				p[i2] = 0;
+				captured.push_back({ i1/N, i1%N });
+				captured.push_back({ i2/N, i2%N });
+			}
+		}
+	}
+
+	// Recompute sn, w and cs from the board; equivalent to having reached the
+	// current position through the incremental updates without captures.
+	void rebuild()
+	{
+		for (int i=0;i<D;i++)
+		{
+			int nh = 0, nc = 0;
+			for (int k=0;k<5;k++)
+			{
+				int v = p[a[i][k]-1];
+				if (v > 0) nc++;
+				else if (v < 0) nh++;
+			}
+			sn[i] = (nh && nc) ? 10 : nc - nh;
+		}
+		for (int i=0;i<N2;i++)
+		{
+			if (p[i]) w[i] = 0;
+			else updat_w(i+1);
+		}
+		for (int j=0;j<E;j++) cs[j] = cp_check(j+1);
+		num_cs();
+	}
+
+	// One move, as performed by both branches of the original main loop,
+	// plus captures when they are enabled.
 	void place(int pt, int mplayer)
 	{
 		p[pt-1] = mplayer;
 		w[pt-1] = 0;
-		eval_s(pt, mplayer);
-		history.push_back({ (pt-1)/N, (pt-1)%N, (pente::Owner)mplayer });
+		pente::Move move{ (pt-1)/N, (pt-1)%N, (pente::Owner)mplayer, {} };
+		if (capture_rules) take_captures(pt, mplayer, move.captured);
+
+		if (move.captured.empty())
+		{
+			eval_s(pt, mplayer);
+			history.push_back(move);
+			status = check_win();
+			if (status != pente::InProgress) return;
+			eval_w(pt);
+			updat_cs(pt);
+			num_cs();
+			return;
+		}
+
+		int& pairs = mplayer == pente::Computer ? captures_c : captures_h;
+		pairs += (int)move.captured.size() / 2;
+		history.push_back(move);
+		rebuild();
 		status = check_win();
-		if (status != pente::InProgress) return;
-		eval_w(pt);
-		updat_cs(pt);
-		num_cs();
+		if (status != pente::ComputerWins && status != pente::HumanWins && pairs >= pente::CapturesToWin)
+		{
+			status = mplayer == pente::Computer ? pente::ComputerWins : pente::HumanWins;
+			won_by_captures = true;
+		}
 	}
 
 	void clear_state()
@@ -398,6 +475,9 @@ namespace
 		for (int i=0;i<E;i++) cs[i] = 0;
 		ncapt_h = 0;
 		ncapt_c = 0;
+		captures_h = 0;
+		captures_c = 0;
+		won_by_captures = false;
 		status = pente::InProgress;
 		win_sol = -1;
 		history.clear();
@@ -413,7 +493,13 @@ namespace
 
 namespace pente
 {
-	void Reset() { clear_state(); }
+	void Reset(bool captureRules)
+	{
+		capture_rules = captureRules;
+		clear_state();
+	}
+
+	bool CaptureRules() { return capture_rules; }
 
 	bool HumanMove(int row, int col)
 	{
@@ -447,7 +533,7 @@ namespace pente
 		keep--;   // drop the human move too
 		std::vector<Move> replay(history.begin(), history.begin() + keep);
 		clear_state();
-		for (const Move& m : replay) place(m.row*N + m.col + 1, m.who);
+		for (const Move& m : replay) place(m.row*N + m.col + 1, m.who);   // captures replay too
 		return true;
 	}
 
@@ -457,7 +543,7 @@ namespace pente
 
 	bool WinningLine(int rows[5], int cols[5])
 	{
-		if (win_sol < 0 || (status != ComputerWins && status != HumanWins)) return false;
+		if (win_sol < 0 || won_by_captures || (status != ComputerWins && status != HumanWins)) return false;
 		for (int k=0;k<5;k++)
 		{
 			rows[k] = (a[win_sol][k]-1)/N;
@@ -465,6 +551,9 @@ namespace pente
 		}
 		return true;
 	}
+
+	bool WonByCaptures() { return won_by_captures; }
+	int Captures(Owner who) { return who == Computer ? captures_c : who == Human ? captures_h : 0; }
 
 	int Weight(int row, int col) { return in_range(row, col) ? w[row*N + col] : 0; }
 

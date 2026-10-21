@@ -2,8 +2,8 @@
 //
 // Click an intersection to place your stone; the computer answers after a short
 // pause. Keyboard: N = new game (you first), C = new game (computer first),
-// U / Ctrl+Z = undo, H = show the computer's evaluation, M = move numbers,
-// S = save the board as text.
+// U / Ctrl+Z = undo, R = capture rules on/off, H = show the computer's
+// evaluation, M = move numbers, S = save the board as text.
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -32,10 +32,11 @@ namespace
 	const UINT_PTR kComputerTimer = 2;
 	const UINT kComputerDelayMs = 550;
 	const ULONGLONG kDropMs = 230;
+	const ULONGLONG kCaptureFadeMs = 450;
 
 	enum class Phase { HumanTurn, Thinking, Over };
 
-	enum ButtonId { BtnNewHuman, BtnNewComputer, BtnUndo, BtnHints, BtnNumbers, BtnSave, BtnCount };
+	enum ButtonId { BtnNewHuman, BtnNewComputer, BtnUndo, BtnCaptures, BtnHints, BtnNumbers, BtnSave, BtnCount };
 
 	struct Button
 	{
@@ -46,6 +47,7 @@ namespace
 	HWND g_hwnd;
 	float g_scale = 1.0f;
 	Phase g_phase = Phase::HumanTurn;
+	bool g_captureRules = true;  // applies from the next game if changed mid-game
 	bool g_showHints = false;
 	bool g_showNumbers = false;
 
@@ -63,6 +65,9 @@ namespace
 	bool g_tracking = false;
 	ULONGLONG g_dropStart = 0;
 	ULONGLONG g_overStart = 0;
+	ULONGLONG g_captureStart = 0;
+	std::vector<pente::Point> g_fading;   // stones just captured, drawn fading out
+	pente::Owner g_fadingOwner = pente::Empty;
 
 	Bitmap* g_backBuffer = nullptr;
 	Bitmap* g_woodCache = nullptr;
@@ -144,7 +149,7 @@ namespace
 
 		g_panelRect = RectF(areaW, pad, panelW - pad, g_height - 2 * pad);
 
-		float bh = S(38), gap = S(8);
+		float bh = S(34), gap = S(6);
 		float y = g_panelRect.GetBottom() - BtnCount * (bh + gap) + gap;
 		for (int i = 0; i < BtnCount; i++)
 		{
@@ -317,31 +322,56 @@ namespace
 
 		const auto& hist = pente::History();
 		float r = g_cell * 0.44f;
-		for (size_t i = 0; i < hist.size(); i++)
-		{
-			const pente::Move& m = hist[i];
-			if (pente::Cell(m.row, m.col) != m.who) continue;
-			PointF c = PointToScreen(m.row, m.col);
-			float scale = 1.0f, alpha = 1.0f;
-			if (i + 1 == hist.size() && now - g_dropStart < kDropMs)
-			{
-				float t = (float)(now - g_dropStart) / kDropMs;
-				float ease = 1 - (1 - t) * (1 - t) * (1 - t);
-				scale = 1.0f + 0.45f * (1 - ease);
-				alpha = ease;
-			}
-			DrawStone(g, c, r * scale, m.who, alpha);
 
-			Color ink = m.who == pente::Human ? Color(255, 60, 50, 40) : Color(255, 235, 230, 220);
-			if (g_showNumbers)
-				DrawText(g, std::to_wstring(i + 1), RectF(c.X - r, c.Y - r, 2 * r, 2 * r), r * 0.8f, FontStyleBold, WithAlpha(ink, alpha), StringAlignmentCenter);
-			else if (i + 1 == hist.size())
-			{
-				SolidBrush dot(WithAlpha(Color(255, 225, 45, 35), alpha));
-				float d = r * 0.22f;
-				g.FillEllipse(&dot, c.X - d, c.Y - d, 2 * d, 2 * d);
-			}
+		// captured stones shrink and fade away
+		if (now >= g_captureStart && now - g_captureStart < kCaptureFadeMs)
+		{
+			float t = (float)(now - g_captureStart) / kCaptureFadeMs;
+			for (const pente::Point& pt : g_fading)
+				if (pente::Cell(pt.row, pt.col) == pente::Empty)
+					DrawStone(g, PointToScreen(pt.row, pt.col), r * (1.0f - 0.35f * t), g_fadingOwner, 1.0f - t);
 		}
+		else if (now < g_captureStart)
+		{
+			for (const pente::Point& pt : g_fading)
+				if (pente::Cell(pt.row, pt.col) == pente::Empty)
+					DrawStone(g, PointToScreen(pt.row, pt.col), r, g_fadingOwner, 1.0f);
+		}
+
+		// With captures a point can be played more than once; the stone on it
+		// belongs to the latest move there.
+		int lastMove[N][N];
+		for (auto& row : lastMove) for (int& v : row) v = -1;
+		for (size_t i = 0; i < hist.size(); i++) lastMove[hist[i].row][hist[i].col] = (int)i;
+
+		for (int row = 0; row < N; row++)
+			for (int col = 0; col < N; col++)
+			{
+				pente::Owner who = pente::Cell(row, col);
+				int i = lastMove[row][col];
+				if (who == pente::Empty || i < 0) continue;
+				PointF c = PointToScreen(row, col);
+				float scale = 1.0f, alpha = 1.0f;
+				bool latest = i + 1 == (int)hist.size();
+				if (latest && now - g_dropStart < kDropMs)
+				{
+					float t = (float)(now - g_dropStart) / kDropMs;
+					float ease = 1 - (1 - t) * (1 - t) * (1 - t);
+					scale = 1.0f + 0.45f * (1 - ease);
+					alpha = ease;
+				}
+				DrawStone(g, c, r * scale, who, alpha);
+
+				Color ink = who == pente::Human ? Color(255, 60, 50, 40) : Color(255, 235, 230, 220);
+				if (g_showNumbers)
+					DrawText(g, std::to_wstring(i + 1), RectF(c.X - r, c.Y - r, 2 * r, 2 * r), r * 0.8f, FontStyleBold, WithAlpha(ink, alpha), StringAlignmentCenter);
+				else if (latest)
+				{
+					SolidBrush dot(WithAlpha(Color(255, 225, 45, 35), alpha));
+					float d = r * 0.22f;
+					g.FillEllipse(&dot, c.X - d, c.Y - d, 2 * d, 2 * d);
+				}
+			}
 
 		// ghost stone under the cursor
 		if (g_phase == Phase::HumanTurn && g_hoverRow >= 0 && pente::Cell(g_hoverRow, g_hoverCol) == pente::Empty)
@@ -369,6 +399,7 @@ namespace
 			float t = std::min(1.0f, (now - g_overStart) / 400.0f);
 			std::wstring msg = pente::Status() == pente::HumanWins ? L"You win!"
 				: pente::Status() == pente::ComputerWins ? L"The computer wins" : L"Tie game";
+			std::wstring how = pente::WonByCaptures() ? L"Five captures  \u00b7  " : L"";
 			// keep the banner clear of the winning row
 			bool lineInTopHalf = false;
 			if (pente::WinningLine(rows, cols)) lineInTopHalf = rows[2] >= N / 2;
@@ -382,7 +413,7 @@ namespace
 			bottom.Y += banner.Height * 0.55f;
 			bottom.Height *= 0.4f;
 			DrawText(g, msg, top, banner.Height * 0.36f, FontStyleBold, WithAlpha(Color(255, 255, 214, 120), t), StringAlignmentCenter, StringAlignmentFar, L"Georgia");
-			DrawText(g, L"Press N or C for a new game", bottom, banner.Height * 0.16f, FontStyleRegular, WithAlpha(Color(255, 200, 200, 210), t), StringAlignmentCenter);
+			DrawText(g, how + L"Press N or C for a new game", bottom, banner.Height * 0.16f, FontStyleRegular, WithAlpha(Color(255, 200, 200, 210), t), StringAlignmentCenter);
 		}
 	}
 
@@ -395,6 +426,12 @@ namespace
 		case BtnNewHuman:    return L"New game – you first   (N)";
 		case BtnNewComputer: return L"New game – computer first   (C)";
 		case BtnUndo:        return L"Undo move   (U)";
+		case BtnCaptures:
+		{
+			std::wstring label = std::wstring(L"Capture rules: ") + (g_captureRules ? L"on" : L"off");
+			if (g_captureRules != pente::CaptureRules()) label += L" (next game)";
+			return label + L"   (R)";
+		}
 		case BtnHints:       return std::wstring(L"Computer's view: ") + (g_showHints ? L"on" : L"off") + L"   (H)";
 		case BtnNumbers:     return std::wstring(L"Move numbers: ") + (g_showNumbers ? L"on" : L"off") + L"   (M)";
 		case BtnSave:        return L"Save board as text…   (S)";
@@ -420,7 +457,8 @@ namespace
 
 		DrawText(g, L"PENTE", RectF(x, y, w, S(46)), S(40), FontStyleBold, accent, StringAlignmentNear, StringAlignmentCenter, L"Georgia");
 		y += S(46);
-		DrawText(g, L"Five in a row wins", RectF(x, y, w, S(20)), S(13), FontStyleItalic, dim);
+		DrawText(g, pente::CaptureRules() ? L"Five in a row or five captures wins" : L"Five in a row wins (no captures)",
+			RectF(x, y, w, S(20)), S(13), FontStyleItalic, dim);
 		y += S(32);
 
 		// status
@@ -433,22 +471,46 @@ namespace
 		case Phase::Thinking:  status = L"Computer is thinking" + std::wstring((now / 300) % 4, L'.'); statusColor = accent; break;
 		case Phase::Over:
 			status = pente::Status() == pente::HumanWins ? L"You win!" : pente::Status() == pente::ComputerWins ? L"Computer wins" : L"Tie game";
+			if (pente::WonByCaptures()) status += L" by captures";
 			statusColor = pente::Status() == pente::HumanWins ? Color(255, 120, 220, 140) : Color(255, 255, 120, 110);
 			break;
 		}
 		DrawText(g, status, st, S(22), FontStyleBold, statusColor);
 
-		// players
+		// players: captured pairs when capture rules are on, otherwise stones on the board
 		RectF pl = Card(g, y, S(84));
-		int humanStones = 0, compStones = 0;
-		for (const auto& m : pente::History()) (m.who == pente::Human ? humanStones : compStones)++;
 		float rowH = pl.Height / 2, r = S(10);
-		DrawStone(g, PointF(pl.X + r, pl.Y + rowH / 2), r, pente::Human, 1.0f);
-		DrawText(g, L"You  (H)", RectF(pl.X + 3 * r, pl.Y, pl.Width, rowH), S(15), FontStyleRegular, text);
-		DrawText(g, std::to_wstring(humanStones) + L" stones", RectF(pl.X, pl.Y, pl.Width, rowH), S(13), FontStyleRegular, dim, StringAlignmentFar);
-		DrawStone(g, PointF(pl.X + r, pl.Y + rowH * 1.5f), r, pente::Computer, 1.0f);
-		DrawText(g, L"Computer  (X)", RectF(pl.X + 3 * r, pl.Y + rowH, pl.Width, rowH), S(15), FontStyleRegular, text);
-		DrawText(g, std::to_wstring(compStones) + L" stones", RectF(pl.X, pl.Y + rowH, pl.Width, rowH), S(13), FontStyleRegular, dim, StringAlignmentFar);
+		auto playerRow = [&](pente::Owner who, const wchar_t* name, float top)
+		{
+			DrawStone(g, PointF(pl.X + r, top + rowH / 2), r, who, 1.0f);
+			DrawText(g, name, RectF(pl.X + 3 * r, top, pl.Width, rowH), S(15), FontStyleRegular, text);
+			if (pente::CaptureRules())
+			{
+				// one slot per pair needed to win, filled with the opponent's colour
+				pente::Owner prisoner = who == pente::Human ? pente::Computer : pente::Human;
+				int pairs = pente::Captures(who);
+				float d = S(7), gap = S(17);
+				for (int k = 0; k < pente::CapturesToWin; k++)
+				{
+					PointF c(pl.GetRight() - d - (pente::CapturesToWin - 1 - k) * gap, top + rowH / 2);
+					if (k < pairs)
+						DrawStone(g, c, d, prisoner, 1.0f);
+					else
+					{
+						Pen slot(Color(255, 80, 86, 104), S(1.2f));
+						g.DrawEllipse(&slot, c.X - d, c.Y - d, 2 * d, 2 * d);
+					}
+				}
+			}
+			else
+			{
+				int stones = 0;
+				for (int rr = 0; rr < N; rr++) for (int cc = 0; cc < N; cc++) stones += pente::Cell(rr, cc) == who;
+				DrawText(g, std::to_wstring(stones) + L" stones", RectF(pl.X, top, pl.Width, rowH), S(13), FontStyleRegular, dim, StringAlignmentFar);
+			}
+		};
+		playerRow(pente::Human, L"You  (H)", pl.Y);
+		playerRow(pente::Computer, L"Computer  (X)", pl.Y + rowH);
 
 		// stats
 		RectF sc = Card(g, y, S(92));
@@ -481,7 +543,13 @@ namespace
 				DrawText(g, std::to_wstring(i + 1) + L".", RectF(hc.X, ly, S(40), lineH), S(13), FontStyleRegular, dim);
 				DrawStone(g, PointF(hc.X + S(50), ly + lineH / 2), S(6), m.who, 1.0f);
 				DrawText(g, PointName(m.row, m.col), RectF(hc.X + S(64), ly, half, lineH), S(14), shown == 0 ? FontStyleBold : FontStyleRegular, shown == 0 ? accent : text);
-				DrawText(g, m.who == pente::Human ? L"you" : L"computer", RectF(hc.X + half, ly, half, lineH), S(12), FontStyleRegular, dim, StringAlignmentFar);
+				std::wstring who = m.who == pente::Human ? L"you" : L"computer";
+				if (!m.captured.empty())
+				{
+					size_t pairs = m.captured.size() / 2;
+					who = L"captures " + std::to_wstring(pairs) + (pairs == 1 ? L" pair \u00b7 " : L" pairs \u00b7 ") + who;
+				}
+				DrawText(g, who, RectF(hc.X + half * 0.4f, ly, half * 1.6f, lineH), S(12), FontStyleRegular, m.captured.empty() ? dim : accent, StringAlignmentFar);
 				ly += lineH;
 			}
 			if (hist.empty())
@@ -492,7 +560,8 @@ namespace
 		for (const Button& b : g_buttons)
 		{
 			bool hot = g_hoverButton == b.id;
-			bool toggledOn = (b.id == BtnHints && g_showHints) || (b.id == BtnNumbers && g_showNumbers);
+			bool toggledOn = (b.id == BtnHints && g_showHints) || (b.id == BtnNumbers && g_showNumbers)
+				|| (b.id == BtnCaptures && g_captureRules);
 			Color fill = hot ? Color(255, 70, 78, 100) : toggledOn ? Color(255, 58, 64, 84) : Color(255, 46, 51, 66);
 			SolidBrush bg(fill);
 			FillRoundRect(g, b.rect, S(8), bg);
@@ -534,6 +603,13 @@ namespace
 	void AfterMove()
 	{
 		g_dropStart = GetTickCount64();
+		const auto& hist = pente::History();
+		if (!hist.empty() && !hist.back().captured.empty())
+		{
+			g_fading = hist.back().captured;
+			g_fadingOwner = hist.back().who == pente::Human ? pente::Computer : pente::Human;
+			g_captureStart = g_dropStart + kDropMs / 2;
+		}
 		if (pente::Status() != pente::InProgress)
 		{
 			g_phase = Phase::Over;
@@ -553,7 +629,8 @@ namespace
 	void NewGame(bool humanFirst)
 	{
 		KillTimer(g_hwnd, kComputerTimer);
-		pente::Reset();
+		pente::Reset(g_captureRules);
+		g_fading.clear();
 		g_phase = Phase::HumanTurn;
 		if (!humanFirst) ComputerTurn();
 		Redraw();
@@ -566,6 +643,7 @@ namespace
 		KillTimer(g_hwnd, kComputerTimer);
 		g_phase = Phase::HumanTurn;
 		g_dropStart = 0;
+		g_fading.clear();
 		Redraw();
 	}
 
@@ -581,11 +659,24 @@ namespace
 		ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
 		if (!GetSaveFileNameW(&ofn)) return;
 
-		std::string text = pente::BoardText() + "\nMoves (X = computer, H = human):\n";
 		const char* letters = "ABCDEFGHJKLMN";
+		auto name = [letters](int row, int col) { return std::string(1, letters[col]) + std::to_string(row + 1); };
+		std::string text = pente::BoardText();
+		if (pente::CaptureRules())
+			text += "\nCapture rules on. Pairs captured: H " + std::to_string(pente::Captures(pente::Human)) +
+				", X " + std::to_string(pente::Captures(pente::Computer)) + "\n";
+		text += "\nMoves (X = computer, H = human):\n";
 		const auto& hist = pente::History();
 		for (size_t i = 0; i < hist.size(); i++)
-			text += std::to_string(i + 1) + ". " + (hist[i].who == pente::Human ? "H " : "X ") + letters[hist[i].col] + std::to_string(hist[i].row + 1) + "\n";
+		{
+			text += std::to_string(i + 1) + ". " + (hist[i].who == pente::Human ? "H " : "X ") + name(hist[i].row, hist[i].col);
+			if (!hist[i].captured.empty())
+			{
+				text += "  captures";
+				for (const auto& c : hist[i].captured) text += " " + name(c.row, c.col);
+			}
+			text += "\n";
+		}
 
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, file, L"w") == 0 && f)
@@ -597,6 +688,21 @@ namespace
 			MessageBoxW(g_hwnd, L"Could not write the file.", L"Pente", MB_ICONERROR);
 	}
 
+	// Switching rules before the human has moved restarts the game at once;
+	// otherwise the change waits for the next new game.
+	void ToggleCaptureRules()
+	{
+		g_captureRules = !g_captureRules;
+		bool humanHasMoved = false;
+		for (const auto& m : pente::History()) humanHasMoved |= m.who == pente::Human;
+		if (!humanHasMoved)
+		{
+			bool computerOpens = !pente::History().empty() || g_phase == Phase::Thinking;
+			NewGame(!computerOpens);
+		}
+		Redraw();
+	}
+
 	void OnButton(ButtonId id)
 	{
 		switch (id)
@@ -604,6 +710,7 @@ namespace
 		case BtnNewHuman:    NewGame(true); break;
 		case BtnNewComputer: NewGame(false); break;
 		case BtnUndo:        UndoMove(); break;
+		case BtnCaptures:    ToggleCaptureRules(); break;
 		case BtnHints:       g_showHints = !g_showHints; Redraw(); break;
 		case BtnNumbers:     g_showNumbers = !g_showNumbers; Redraw(); break;
 		case BtnSave:        SaveBoard(); break;
@@ -636,7 +743,7 @@ namespace
 
 	bool Animating(ULONGLONG now)
 	{
-		return now - g_dropStart < kDropMs + 50 || g_phase == Phase::Thinking
+		return now - g_dropStart < kDropMs + 50 || now - g_captureStart < kCaptureFadeMs + 50 || g_phase == Phase::Thinking
 			|| (g_phase == Phase::Over && (pente::Status() != pente::Tie || now - g_overStart < 500));
 	}
 
@@ -732,6 +839,7 @@ namespace
 			case 'N': NewGame(true); break;
 			case 'C': NewGame(false); break;
 			case 'U': UndoMove(); break;
+			case 'R': OnButton(BtnCaptures); break;
 			case 'Z': if (GetKeyState(VK_CONTROL) < 0) UndoMove(); break;
 			case 'H': OnButton(BtnHints); break;
 			case 'M': OnButton(BtnNumbers); break;
@@ -761,7 +869,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 	ULONG_PTR token;
 	GdiplusStartup(&token, &gsi, nullptr);
 
-	pente::Reset();
+	pente::Reset(g_captureRules);
 
 	WNDCLASSEXW wc = { sizeof(wc) };
 	wc.lpfnWndProc = WndProc;
