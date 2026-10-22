@@ -41,7 +41,8 @@ namespace pente
 	// Place a human stone. Returns false if the point is occupied or the game is over.
 	bool HumanMove(int row, int col);
 
-	// Let the computer choose and place a stone. Returns false if the game is over.
+	// Let the computer choose (see PlannedMove) and place a stone. Returns false
+	// if the game is over.
 	bool ComputerMove(int& row, int& col);
 
 	// Take back the most recent human move together with any computer replies.
@@ -64,6 +65,12 @@ namespace pente
 	int Weight(int row, int col);
 	int LineWeight(int row, int col);     // the original five-in-a-row weight
 	int CaptureWeight(int row, int col);  // capture bonus/penalty (0 without capture rules)
+
+	// The point the computer will play next. With capture rules on this is the
+	// highest-weighted point that does not let the human win on their next move;
+	// RejectedMoves lists the higher-weighted points skipped for that reason.
+	bool PlannedMove(int& row, int& col);
+	std::vector<Point> RejectedMoves();
 
 	int RemainingSolutions();      // five-in-a-row lines still open to someone
 	int ComputerCaptureThreats();  // capture opportunities currently open to the computer

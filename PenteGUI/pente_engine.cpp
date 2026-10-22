@@ -12,6 +12,10 @@
 // weights (cw) and plays the empty point with the highest w + cw. The original
 // weights w are never changed by this, so games without captures play exactly
 // as before.
+//
+// Also with capture rules on, the computer checks its move one ply ahead: it
+// plays the highest-weighted point after which the human cannot win at once
+// (by five in a row or by a fifth capture). See plan_move.
 #include "pente_engine.h"
 #include <algorithm>
 
@@ -590,10 +594,119 @@ namespace
 		}
 	}
 
+	// ---------------------------------------------------------------
+	// One-ply safety check (capture rules only).
+
+	bool use_safety_check = true;        // tests switch this off to compare
+	bool plan_valid = false;
+	int planned_pt = 0;                  // 1-based point, 0 = no move
+	std::vector<int> rejected;           // higher-weighted points that lose at once
+
 	void place(int pt, int mplayer)
 	{
 		place_stone(pt, mplayer);
 		update_capture_weights();
+		plan_valid = false;
+	}
+
+	// Everything place() can change; a, t, cp and ct are fixed after clear_state.
+	struct Snapshot
+	{
+		int p[N2], sn[D], w[N2], cs[E], cw[N2];
+		int ncapt_h, ncapt_c, captures_h, captures_c, win_sol;
+		bool won_by_captures;
+		pente::Result status;
+		size_t moves;
+	};
+
+	void save(Snapshot& s)
+	{
+		std::copy(p, p + N2, s.p);
+		std::copy(sn, sn + D, s.sn);
+		std::copy(w, w + N2, s.w);
+		std::copy(cs, cs + E, s.cs);
+		std::copy(cw, cw + N2, s.cw);
+		s.ncapt_h = ncapt_h; s.ncapt_c = ncapt_c;
+		s.captures_h = captures_h; s.captures_c = captures_c;
+		s.win_sol = win_sol; s.won_by_captures = won_by_captures;
+		s.status = status;
+		s.moves = history.size();
+	}
+
+	void restore(const Snapshot& s)
+	{
+		std::copy(s.p, s.p + N2, p);
+		std::copy(s.sn, s.sn + D, sn);
+		std::copy(s.w, s.w + N2, w);
+		std::copy(s.cs, s.cs + E, cs);
+		std::copy(s.cw, s.cw + N2, cw);
+		ncapt_h = s.ncapt_h; ncapt_c = s.ncapt_c;
+		captures_h = s.captures_h; captures_c = s.captures_c;
+		win_sol = s.win_sol; won_by_captures = s.won_by_captures;
+		status = s.status;
+		history.resize(s.moves);
+	}
+
+	// Can the human win with their next stone? A five needs a line holding four
+	// human stones and nothing else (sn == -4); a capture win needs enough pairs
+	// takeable with one stone.
+	bool human_wins_next()
+	{
+		for (int k=0;k<D;k++)
+			if (sn[k] == -4) return true;
+		if (!capture_rules) return false;
+		static const int dirs[8][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} };
+		for (int q=0;q<N2;q++)
+		{
+			if (p[q]) continue;
+			int x = q%N, y = q/N, pairs = 0;
+			for (const auto& d : dirs)
+				if (stone_at(x + d[0], y + d[1]) == pente::Computer && stone_at(x + 2*d[0], y + 2*d[1]) == pente::Computer
+					&& stone_at(x + 3*d[0], y + 3*d[1]) == pente::Human)
+					pairs++;
+			if (captures_h + pairs >= pente::CapturesToWin) return true;
+		}
+		return false;
+	}
+
+	// Rank empty points by total weight (ties: lowest point first, as selec_pt)
+	// and take the first that wins or leaves the human no immediate win. If every
+	// move loses, play the top-weighted one.
+	void plan_move()
+	{
+		plan_valid = true;
+		rejected.clear();
+		planned_pt = choose_pt();
+		if (!capture_rules || !use_capture_weights || !use_safety_check || planned_pt == 0) return;
+
+		std::vector<int> order;
+		for (int i=0;i<N2;i++) if (!p[i]) order.push_back(i);
+		std::stable_sort(order.begin(), order.end(), [](int x, int y) { return total_weight(x) > total_weight(y); });
+
+		static Snapshot snap;
+		save(snap);
+		for (int q : order)
+		{
+			place(q + 1, pente::Computer);
+			bool safe = status == pente::ComputerWins || status == pente::Tie
+				|| (status == pente::InProgress && !human_wins_next());
+			restore(snap);
+			if (safe)
+			{
+				planned_pt = q + 1;
+				plan_valid = true;
+				return;
+			}
+			rejected.push_back(q);
+		}
+		rejected.clear();      // every move loses: nothing to choose between
+		plan_valid = true;     // planned_pt is still the top-weighted point
+	}
+
+	int computer_pt()
+	{
+		if (!plan_valid) plan_move();
+		return planned_pt;
 	}
 
 	void clear_state()
@@ -620,6 +733,7 @@ namespace
 		init_cp();
 		init_ct();
 		for (int i=0;i<N2;i++) cw[i] = 0;
+		plan_valid = false;
 	}
 
 	bool in_range(int row, int col) { return row >= 0 && row < N && col >= 0 && col < N; }
@@ -647,7 +761,7 @@ namespace pente
 	bool ComputerMove(int& row, int& col)
 	{
 		if (status != InProgress) return false;
-		int pt = choose_pt();
+		int pt = computer_pt();
 		if (pt == 0)
 		{
 			status = Tie;
@@ -692,6 +806,25 @@ namespace pente
 	int Weight(int row, int col) { return in_range(row, col) ? total_weight(row*N + col) : 0; }
 	int LineWeight(int row, int col) { return in_range(row, col) && !p[row*N + col] ? w[row*N + col] : 0; }
 	int CaptureWeight(int row, int col) { return in_range(row, col) ? cw[row*N + col] : 0; }
+
+	bool PlannedMove(int& row, int& col)
+	{
+		if (status != InProgress) return false;
+		int pt = computer_pt();
+		if (pt == 0) return false;
+		row = (pt-1)/N;
+		col = (pt-1)%N;
+		return true;
+	}
+
+	std::vector<Point> RejectedMoves()
+	{
+		std::vector<Point> out;
+		if (status != InProgress) return out;
+		computer_pt();
+		for (int q : rejected) out.push_back({ q/N, q%N });
+		return out;
+	}
 
 	int RemainingSolutions()
 	{

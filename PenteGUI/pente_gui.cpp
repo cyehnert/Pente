@@ -296,11 +296,32 @@ namespace
 				SolidBrush b(WithAlpha(HeatColor(v), 0.35f + 0.4f * v));
 				g.FillEllipse(&b, p.X - rad, p.Y - rad, 2 * rad, 2 * rad);
 			}
+		// higher-weighted points the computer skips because they lose at once
+		float arm = g_cell * 0.2f;
+		Pen cross(Color(235, 190, 20, 20), S(3));
+		cross.SetStartCap(LineCapRound);
+		cross.SetEndCap(LineCapRound);
+		for (const pente::Point& pt : pente::RejectedMoves())
+		{
+			PointF c = PointToScreen(pt.row, pt.col);
+			g.DrawLine(&cross, c.X - arm, c.Y - arm, c.X + arm, c.Y + arm);
+			g.DrawLine(&cross, c.X - arm, c.Y + arm, c.X + arm, c.Y - arm);
+		}
+
+		// the point the computer will play
+		pente::PlannedMove(bestRow, bestCol);
 		PointF p = PointToScreen(bestRow, bestCol);
 		float rad = g_cell * 0.46f;
 		Pen ring(Color(230, 200, 20, 20), S(2));
 		ring.SetDashStyle(DashStyleDash);
 		g.DrawEllipse(&ring, p.X - rad, p.Y - rad, 2 * rad, 2 * rad);
+	}
+
+	bool IsRejected(int row, int col)
+	{
+		for (const pente::Point& pt : pente::RejectedMoves())
+			if (pt.row == row && pt.col == col) return true;
+		return false;
 	}
 
 	void DrawBoard(Graphics& g, ULONGLONG now)
@@ -531,6 +552,7 @@ namespace
 					int cw = pente::CaptureWeight(row, col);
 					pointInfo += L" = " + std::to_wstring(pente::LineWeight(row, col)) + (cw < 0 ? L" − " : L" + ") + std::to_wstring(std::abs(cw));
 					if (pente::LineWeight(row, col) + cw < 1) pointInfo += L" (min 1)";
+					if (IsRejected(row, col)) pointInfo += L" – unsafe";
 				}
 			}
 		}
