@@ -1,0 +1,71 @@
+Row
+13                              
+
+12                              
+
+11                              
+
+10          X   H               
+
+ 9            H X   H           
+
+ 8              H   X           
+
+ 7            X H H H X         
+
+ 6              H   H X         
+
+ 5        H X X X H   X         
+
+ 4            X H H H H H       
+
+ 3              X   X           
+
+ 2          X X                 
+
+ 1                              
+
+Col   A B C D E F G H J K L M N
+
+Capture rules on. Pairs captured: H 2, X 2
+
+Moves (X = computer, H = human):
+1. H H6
+2. X E5
+3. H F7
+4. X F5
+5. H G5
+6. X D5
+7. H F4
+8. X J7
+9. H E3
+10. X D2
+11. H G7
+12. X J5
+13. H F8
+14. X J6
+15. H J4
+16. X G6
+17. H H7
+18. X H8
+19. H E4  captures F5 G6
+20. X E2  captures E3 E4
+21. H C5
+22. X F5
+23. H H5
+24. X G9
+25. H F10
+26. X F9
+27. H E9
+28. X D10
+29. H H9  captures G9 F9
+30. X F9
+31. H F6
+32. X E7
+33. H H4
+34. X H3
+35. H G4
+36. X F3  captures G4 H5
+37. H G4
+38. X E4
+39. H K4
