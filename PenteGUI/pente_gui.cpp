@@ -4,11 +4,15 @@
 // pause. Keyboard: N = new game (you first), C = new game (computer first),
 // U / Ctrl+Z = undo, R = capture rules on/off, H = show the computer's
 // evaluation, M = move numbers, S = save the board as text.
+//
+// Every game the human takes part in is logged automatically to a text file
+// (see "game log" below), rewritten after each move and undo.
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>
 #include <commdlg.h>
+#include <shlobj.h>
 #include <objidl.h>
 #include <algorithm>
 #include <cmath>
@@ -21,6 +25,7 @@ namespace Gdiplus { using std::min; using std::max; }
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 using namespace Gdiplus;
 using pente::N;
@@ -68,6 +73,13 @@ namespace
 	ULONGLONG g_captureStart = 0;
 	std::vector<pente::Point> g_fading;   // stones just captured, drawn fading out
 	pente::Owner g_fadingOwner = pente::Empty;
+
+	// game log (see "game log" below)
+	std::wstring g_logDir;
+	std::wstring g_logFile;              // empty until the human's first move
+	std::wstring g_logStarted;           // game start, for the file name and header
+	std::vector<std::string> g_logLines;
+	bool g_logHumanFirst = true;
 
 	Bitmap* g_backBuffer = nullptr;
 	Bitmap* g_woodCache = nullptr;
@@ -564,6 +576,11 @@ namespace
 		{
 			RectF hc = Card(g, y, histBottom - y);
 			DrawText(g, L"MOVES", RectF(hc.X, hc.Y, hc.Width, S(20)), S(12), FontStyleBold, dim);
+			if (!g_logFile.empty())
+			{
+				std::wstring name = g_logFile.substr(g_logFile.find_last_of(L"\\") + 1);
+				DrawText(g, L"log: " + name, RectF(hc.X, hc.Y, hc.Width, S(20)), S(11), FontStyleRegular, dim, StringAlignmentFar);
+			}
 			const auto& hist = pente::History();
 			float ly = hc.Y + S(24), lineH = S(21);
 			int shown = 0;
@@ -627,12 +644,132 @@ namespace
 		screen.DrawImage(g_backBuffer, 0, 0);
 	}
 
+	// ---------------------------------------------------------------- game log
+	//
+	// One file per game, named after the time the game started, in the
+	// "games" folder next to Pente.sln (found by walking up from the program's
+	// folder), or Documents\Pente\games when the program runs elsewhere. The
+	// file records every move and every undo so a game can be replayed exactly:
+	//
+	//     12. H G7  captures E6 F5
+	//     -- undo: moves 11-12 taken back
+
+	std::string MoveName(int row, int col)
+	{
+		return std::string(1, "ABCDEFGHJKLMN"[col]) + std::to_string(row + 1);
+	}
+
+	std::string Narrow(const std::wstring& w)
+	{
+		std::string s;
+		for (wchar_t c : w) s += static_cast<char>(c);   // log paths and dates are ASCII
+		return s;
+	}
+
+	std::wstring FindLogDir()
+	{
+		wchar_t buf[MAX_PATH];
+		DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+		std::wstring dir(buf, n);
+		while (true)
+		{
+			size_t slash = dir.find_last_of(L"\\/");
+			if (slash == std::wstring::npos) break;
+			dir.resize(slash);
+			if (GetFileAttributesW((dir + L"\\Pente.sln").c_str()) != INVALID_FILE_ATTRIBUTES)
+				return dir + L"\\games";
+		}
+		if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, buf)))
+			return std::wstring(buf) + L"\\Pente\\games";
+		return L"games";
+	}
+
+	void StartLog(bool humanFirst)
+	{
+		SYSTEMTIME t;
+		GetLocalTime(&t);
+		wchar_t stamp[32];
+		swprintf_s(stamp, L"%04d-%02d-%02d %02d:%02d:%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+		g_logStarted = stamp;
+		g_logFile.clear();
+		g_logLines.clear();
+		g_logHumanFirst = humanFirst;
+	}
+
+	void WriteLog()
+	{
+		bool humanMoved = false;
+		for (const auto& m : pente::History()) humanMoved |= m.who == pente::Human;
+		if (!humanMoved && g_logFile.empty()) return;   // nothing of the human's to keep yet
+
+		if (g_logFile.empty())
+		{
+			if (g_logDir.empty()) g_logDir = FindLogDir();
+			SHCreateDirectoryExW(nullptr, g_logDir.c_str(), nullptr);
+			std::wstring name = g_logStarted;
+			for (wchar_t& c : name) if (c == L':') c = L'-'; else if (c == L' ') c = L'_';
+			g_logFile = g_logDir + L"\\" + name + L".txt";
+		}
+
+		std::string result;
+		switch (pente::Status())
+		{
+		case pente::HumanWins:    result = "human wins"; break;
+		case pente::ComputerWins: result = "computer wins"; break;
+		case pente::Tie:          result = "tie"; break;
+		default:                  result = "not finished"; break;
+		}
+		if (pente::Status() == pente::HumanWins || pente::Status() == pente::ComputerWins)
+			result += pente::WonByCaptures() ? " (five captures)" : " (five in a row)";
+
+		std::string text = "Pente game log\n";
+		text += "Started: " + Narrow(g_logStarted) + "\n";
+		text += std::string("Capture rules: ") + (pente::CaptureRules() ? "on" : "off") + "\n";
+		text += std::string("First move: ") + (g_logHumanFirst ? "human" : "computer") + "\n";
+		text += "Result: " + result + "\n";
+		if (pente::CaptureRules())
+			text += "Pairs captured: H " + std::to_string(pente::Captures(pente::Human)) +
+				", X " + std::to_string(pente::Captures(pente::Computer)) + "\n";
+		text += "\nMoves (H = human, X = computer):\n";
+		for (const auto& line : g_logLines) text += line + "\n";
+		text += "\nFinal position:\n" + pente::BoardText();
+
+		FILE* f = nullptr;
+		if (_wfopen_s(&f, g_logFile.c_str(), L"w") == 0 && f)
+		{
+			fputs(text.c_str(), f);
+			fclose(f);
+		}
+	}
+
+	void LogLastMove()
+	{
+		const auto& hist = pente::History();
+		if (hist.empty()) return;
+		const pente::Move& m = hist.back();
+		std::string line = std::to_string(hist.size()) + ". " + (m.who == pente::Human ? "H " : "X ") + MoveName(m.row, m.col);
+		if (!m.captured.empty())
+		{
+			line += "  captures";
+			for (const auto& c : m.captured) line += " " + MoveName(c.row, c.col);
+		}
+		g_logLines.push_back(line);
+		WriteLog();
+	}
+
+	void LogUndo(size_t before, size_t after)
+	{
+		g_logLines.push_back("-- undo: moves " + std::to_string(after + 1) + "-" + std::to_string(before) + " taken back");
+		WriteLog();
+	}
+
 	// ---------------------------------------------------------------- game flow
 
 	void Redraw() { InvalidateRect(g_hwnd, nullptr, FALSE); }
 
 	void AfterMove()
 	{
+		LogLastMove();
 		g_dropStart = GetTickCount64();
 		const auto& hist = pente::History();
 		if (!hist.empty() && !hist.back().captured.empty())
@@ -661,6 +798,7 @@ namespace
 	{
 		KillTimer(g_hwnd, kComputerTimer);
 		pente::Reset(g_captureRules);
+		StartLog(humanFirst);
 		g_fading.clear();
 		g_phase = Phase::HumanTurn;
 		if (!humanFirst) ComputerTurn();
@@ -670,7 +808,9 @@ namespace
 	void UndoMove()
 	{
 		// Takes back the last human move (and the computer's reply, or its pending one).
+		size_t before = pente::History().size();
 		if (!pente::Undo()) return;
+		LogUndo(before, pente::History().size());
 		KillTimer(g_hwnd, kComputerTimer);
 		g_phase = Phase::HumanTurn;
 		g_dropStart = 0;
@@ -687,6 +827,9 @@ namespace
 		ofn.lpstrFile = file;
 		ofn.nMaxFile = MAX_PATH;
 		ofn.lpstrDefExt = L"txt";
+		if (g_logDir.empty()) g_logDir = FindLogDir();
+		SHCreateDirectoryExW(nullptr, g_logDir.c_str(), nullptr);
+		ofn.lpstrInitialDir = g_logDir.c_str();
 		ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
 		if (!GetSaveFileNameW(&ofn)) return;
 
@@ -901,6 +1044,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 	GdiplusStartup(&token, &gsi, nullptr);
 
 	pente::Reset(g_captureRules);
+	StartLog(true);
 
 	WNDCLASSEXW wc = { sizeof(wc) };
 	wc.lpfnWndProc = WndProc;
