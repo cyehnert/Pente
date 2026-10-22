@@ -13,9 +13,10 @@
 // weights w are never changed by this, so games without captures play exactly
 // as before.
 //
-// Also with capture rules on, the computer checks its move one ply ahead: it
-// plays the highest-weighted point after which the human cannot win at once
-// (by five in a row or by a fifth capture). See plan_move.
+// Also with capture rules on, the computer checks its candidate moves before
+// playing: it skips a move if the human could then win at once (five in a row
+// or a fifth capture), or could force a win with a short series of fours and
+// capture-win threats, e.g. a four plus an open three. See plan_move.
 #include "pente_engine.h"
 #include <algorithm>
 
@@ -600,7 +601,14 @@ namespace
 	bool use_safety_check = true;        // tests switch this off to compare
 	bool plan_valid = false;
 	int planned_pt = 0;                  // 1-based point, 0 = no move
-	std::vector<int> rejected;           // higher-weighted points that lose at once
+	std::vector<int> rejected;           // higher-weighted points skipped as losing
+
+	// Forcing-sequence search limits.
+	int force_depth = 3;                 // human forcing moves looked through (tests vary it)
+	const long FORCE_BUDGET = 20000;     // stones placed per plan (about 0.3 s at most)
+	long force_nodes = 0;
+	int forced_checks = 0;               // statistics for tests
+	bool budget_hit = false;
 
 	void place(int pt, int mplayer)
 	{
@@ -669,9 +677,126 @@ namespace
 		return false;
 	}
 
+	// Pairs `mover` would capture by playing the empty point q.
+	int pairs_at(int q, int mover)
+	{
+		static const int dirs[8][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} };
+		int x = q%N, y = q/N, pairs = 0;
+		for (const auto& d : dirs)
+			if (stone_at(x + d[0], y + d[1]) == -mover && stone_at(x + 2*d[0], y + 2*d[1]) == -mover
+				&& stone_at(x + 3*d[0], y + 3*d[1]) == mover)
+				pairs++;
+		return pairs;
+	}
+
+	void add_unique(std::vector<int>& v, int q)
+	{
+		if (std::find(v.begin(), v.end(), q) == v.end()) v.push_back(q);
+	}
+
+	// Empty points where one stone wins for `who`: completes a five (a line
+	// holding four of their stones and nothing else) or takes their fifth pair.
+	std::vector<int> win_points(int who)
+	{
+		std::vector<int> pts;
+		for (int k=0;k<D;k++)
+			if (sn[k] == 4*who)
+				for (int j=0;j<5;j++)
+					if (!p[a[k][j]-1]) add_unique(pts, a[k][j]-1);
+		if (capture_rules)
+		{
+			int held = who == pente::Human ? captures_h : captures_c;
+			for (int q=0;q<N2;q++)
+				if (!p[q] && held + pairs_at(q, who) >= pente::CapturesToWin) add_unique(pts, q);
+		}
+		return pts;
+	}
+
+	// Human moves that may create a winning point: making a four (an empty
+	// point in a line holding three human stones and nothing else), or, when
+	// the human is near five captures, setting up a capture (H X X _).
+	std::vector<int> human_forcing_moves()
+	{
+		std::vector<int> moves;
+		for (int k=0;k<D;k++)
+			if (sn[k] == -3)
+				for (int j=0;j<5;j++)
+					if (!p[a[k][j]-1]) add_unique(moves, a[k][j]-1);
+		if (capture_rules && captures_h >= pente::CapturesToWin - 2)
+		{
+			static const int dirs[8][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} };
+			for (int q=0;q<N2;q++)
+			{
+				if (p[q]) continue;
+				int x = q%N, y = q/N;
+				for (const auto& d : dirs)
+					if (stone_at(x + d[0], y + d[1]) == pente::Computer && stone_at(x + 2*d[0], y + 2*d[1]) == pente::Computer
+						&& stone_at(x + 3*d[0], y + 3*d[1]) == 0)
+					{
+						add_unique(moves, q);
+						break;
+					}
+			}
+		}
+		return moves;
+	}
+
+	// With the human to move, can they force a win within `depth` forcing
+	// moves? Each forcing move must leave the human a winning point; the
+	// computer may then answer on any winning point of the human's, with any
+	// capture, or with its own winning point. Those are its only answers to an
+	// immediate threat, so a "true" here is a real forced win. Moves that only
+	// threaten (open threes) are not followed, so not every forced win is found.
+	bool human_forced_win(int depth)
+	{
+		if (!win_points(pente::Human).empty()) return true;
+		if (depth == 0 || force_nodes > FORCE_BUDGET)
+		{
+			if (force_nodes > FORCE_BUDGET) budget_hit = true;
+			return false;
+		}
+		Snapshot before;
+		save(before);
+		for (int h : human_forcing_moves())
+		{
+			force_nodes++;
+			place_stone(h + 1, pente::Human);
+			bool forced = false;
+			if (status == pente::HumanWins) forced = true;
+			else if (status == pente::InProgress)
+			{
+				std::vector<int> threats = win_points(pente::Human);
+				if (!threats.empty())
+				{
+					std::vector<int> answers = threats;
+					for (int c : win_points(pente::Computer)) add_unique(answers, c);
+					for (int q=0;q<N2;q++)
+						if (!p[q] && pairs_at(q, pente::Computer) > 0) add_unique(answers, q);
+					forced = true;
+					Snapshot afterThreat;
+					save(afterThreat);
+					for (int c : answers)
+					{
+						force_nodes++;
+						place_stone(c + 1, pente::Computer);
+						bool holds = status == pente::ComputerWins || status == pente::Tie
+							|| (status == pente::InProgress && !human_forced_win(depth - 1));
+						restore(afterThreat);
+						if (holds) { forced = false; break; }
+					}
+				}
+			}
+			restore(before);
+			if (forced) return true;
+		}
+		return false;
+	}
+
 	// Rank empty points by total weight (ties: lowest point first, as selec_pt)
-	// and take the first that wins or leaves the human no immediate win. If every
-	// move loses, play the top-weighted one.
+	// and play the first that wins outright, or after which the human has
+	// neither an immediate win nor a forced one. If every move loses at once,
+	// play the top-weighted point; if every move loses to a forced sequence,
+	// play the top-weighted point that at least survives the next move.
 	void plan_move()
 	{
 		plan_valid = true;
@@ -683,13 +808,24 @@ namespace
 		for (int i=0;i<N2;i++) if (!p[i]) order.push_back(i);
 		std::stable_sort(order.begin(), order.end(), [](int x, int y) { return total_weight(x) > total_weight(y); });
 
-		static Snapshot snap;
+		force_nodes = 0;
+		budget_hit = false;
+		Snapshot snap;
 		save(snap);
+		int firstSurvivor = -1;              // best move that does not lose at once
+		size_t rejectedAtOnce = 0;           // rejected[] entries before firstSurvivor
 		for (int q : order)
 		{
-			place(q + 1, pente::Computer);
-			bool safe = status == pente::ComputerWins || status == pente::Tie
-				|| (status == pente::InProgress && !human_wins_next());
+			force_nodes++;
+			place_stone(q + 1, pente::Computer);
+			bool wins = status == pente::ComputerWins;
+			bool survives = wins || status == pente::Tie || (status == pente::InProgress && !human_wins_next());
+			bool safe = survives;
+			if (survives && !wins && status == pente::InProgress && force_nodes <= FORCE_BUDGET)
+			{
+				forced_checks++;
+				safe = !human_forced_win(force_depth);
+			}
 			restore(snap);
 			if (safe)
 			{
@@ -697,10 +833,22 @@ namespace
 				plan_valid = true;
 				return;
 			}
+			if (survives && firstSurvivor < 0)
+			{
+				firstSurvivor = q;
+				rejectedAtOnce = rejected.size();
+			}
 			rejected.push_back(q);
 		}
-		rejected.clear();      // every move loses: nothing to choose between
-		plan_valid = true;     // planned_pt is still the top-weighted point
+		// Everything loses. Prefer a move that survives the next human move.
+		if (firstSurvivor >= 0)
+		{
+			planned_pt = firstSurvivor + 1;
+			rejected.resize(rejectedAtOnce);
+		}
+		else
+			rejected.clear();
+		plan_valid = true;
 	}
 
 	int computer_pt()
