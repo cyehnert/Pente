@@ -1,0 +1,60 @@
+Pente game log
+Started: 2026-10-22 18:08:26
+Capture rules: on
+First move: human
+Result: computer wins (five in a row)
+Pairs captured: H 0, X 2
+
+Moves (H = human, X = computer):
+1. H G7
+2. X F5
+3. H H5
+4. X E6
+5. H G4
+6. X D7
+7. H G6
+8. X G8
+9. H G5
+10. X J5  captures H5 G5
+11. H H5
+12. X F7
+13. H D5
+14. X J4  captures H5 G6
+15. H J6
+16. X J3
+17. H F3
+18. X H5
+19. H E2
+20. X G6
+21. H K3
+22. X E8
+
+Final position:
+Row
+13                              
+
+12                              
+
+11                              
+
+10                              
+
+ 9                              
+
+ 8            X   X             
+
+ 7          X   X H             
+
+ 6            X   X   H         
+
+ 5          H   X   X X         
+
+ 4                H   X         
+
+ 3              H     X H       
+
+ 2            H                 
+
+ 1                              
+
+Col   A B C D E F G H J K L M N

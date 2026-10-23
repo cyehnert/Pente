@@ -66,8 +66,8 @@ namespace pente
 	int LineWeight(int row, int col);     // the original five-in-a-row weight
 	int CaptureWeight(int row, int col);  // capture bonus/penalty (0 without capture rules)
 
-	// The point the computer will play next. With capture rules on this is the
-	// highest-weighted point that does not let the human win on their next move;
+	// The point the computer will play next: the highest-weighted point that
+	// does not let the human win at once or by a short forced sequence;
 	// RejectedMoves lists the higher-weighted points skipped for that reason.
 	bool PlannedMove(int& row, int& col);
 	std::vector<Point> RejectedMoves();
