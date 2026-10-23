@@ -16,10 +16,14 @@
 // In every game the computer checks its candidate moves before playing: it
 // skips a move if the human could then win at once (five in a row or a fifth
 // capture), or could force a win with a short series of fours and capture-win
-// threats, e.g. a four plus an open three. Otherwise it plays the highest-
-// weighted point, as the original program did. See plan_move.
+// threats, e.g. a four plus an open three. For its best few candidates it
+// also checks the human's quiet moves (making a three or setting up a
+// capture) for one that wins whatever the computer replies, such as two open
+// threes at once. Otherwise it plays the highest-weighted point, as the
+// original program did. See plan_move.
 #include "pente_engine.h"
 #include <algorithm>
+#include <cstdlib>
 
 namespace
 {
@@ -647,6 +651,15 @@ namespace
 	int forced_checks = 0;               // statistics for tests
 	bool budget_hit = false;
 
+	// Quiet-threat check limits.
+	bool use_quiet_check = true;         // tests switch this off to compare
+	int quiet_candidates = 6;            // safe candidate moves checked per plan
+	int quiet_inner_depth = 2;           // forcing depth after each computer reply
+	long quiet_budget = 40000;           // stones placed per plan by the quiet check
+	long quiet_call_budget = 3000;       // ... per forcing search inside it
+	long quiet_nodes = 0;
+	int quiet_rejections = 0;            // statistics for tests
+
 	void place(int pt, int mplayer)
 	{
 		place_stone(pt, mplayer);
@@ -829,11 +842,103 @@ namespace
 		return false;
 	}
 
+	// human_forced_win with its own small budget, so the quiet check cannot use
+	// up the forcing search's budget. Running out counts as "no win".
+	bool forced_win_limited(int depth)
+	{
+		long savedNodes = force_nodes, savedBudget = force_budget;
+		bool savedHit = budget_hit;
+		force_nodes = 0;
+		force_budget = quiet_call_budget;
+		bool r = human_forced_win(depth) && force_nodes <= force_budget;
+		quiet_nodes += force_nodes;
+		force_nodes = savedNodes;
+		force_budget = savedBudget;
+		budget_hit = savedHit;
+		return r;
+	}
+
+	// Human quiet moves worth checking: making a three (an empty point in a
+	// line holding two human stones and nothing else), or setting up a capture
+	// (H X X _).
+	std::vector<int> human_quiet_moves()
+	{
+		std::vector<int> moves;
+		for (int k=0;k<D;k++)
+			if (sn[k] == -2)
+				for (int j=0;j<5;j++)
+					if (!p[a[k][j]-1]) add_unique(moves, a[k][j]-1);
+		if (capture_rules)
+		{
+			static const int dirs[8][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} };
+			for (int q=0;q<N2;q++)
+			{
+				if (p[q]) continue;
+				int x = q%N, y = q/N;
+				for (const auto& d : dirs)
+					if (stone_at(x + d[0], y + d[1]) == pente::Computer && stone_at(x + 2*d[0], y + 2*d[1]) == pente::Computer
+						&& stone_at(x + 3*d[0], y + 3*d[1]) == 0)
+					{
+						add_unique(moves, q);
+						break;
+					}
+			}
+		}
+		return moves;
+	}
+
+	// With the human to move: is there a quiet move after which the human
+	// forces a win whatever the computer replies? Every reply is tried, so a
+	// "true" is as sound as human_forced_win itself.
+	bool human_quiet_win()
+	{
+		Snapshot before;
+		save(before);
+		for (int h : human_quiet_moves())
+		{
+			if (quiet_nodes > quiet_budget) break;
+			quiet_nodes++;
+			place_stone(h + 1, pente::Human);
+			bool win = status == pente::HumanWins;
+			// A threat at all? Only if the human could force a win were the
+			// computer to ignore it; most quiet moves stop here.
+			if (status == pente::InProgress && forced_win_limited(quiet_inner_depth))
+			{
+				win = true;
+				Snapshot mid;
+				save(mid);
+				// Replies near the threat first: they are the likely defences.
+				std::vector<int> replies;
+				for (int c=0;c<N2;c++) if (!p[c]) replies.push_back(c);
+				int hx = h%N, hy = h/N;
+				std::stable_sort(replies.begin(), replies.end(), [hx, hy](int x, int y)
+				{
+					return std::max(std::abs(x%N - hx), std::abs(x/N - hy)) < std::max(std::abs(y%N - hx), std::abs(y/N - hy));
+				});
+				for (int c : replies)
+				{
+					if (quiet_nodes > quiet_budget) { win = false; break; }   // unknown: assume it holds
+					quiet_nodes++;
+					place_stone(c + 1, pente::Computer);
+					bool holds = status == pente::ComputerWins || status == pente::Tie
+						|| (status == pente::InProgress && !forced_win_limited(quiet_inner_depth));
+					restore(mid);
+					if (holds) { win = false; break; }
+				}
+			}
+			restore(before);
+			if (win) return true;
+		}
+		return false;
+	}
+
 	// Rank empty points by total weight (ties: lowest point first, as selec_pt)
 	// and play the first that wins outright, or after which the human has
-	// neither an immediate win nor a forced one. If every move loses at once,
-	// play the top-weighted point; if every move loses to a forced sequence,
-	// play the top-weighted point that at least survives the next move.
+	// neither an immediate win, nor a forced one, nor (for the first
+	// quiet_candidates such moves) a quiet move that wins by force. If every
+	// move loses, prefer the best move that only loses to a quiet threat, then
+	// the best move that survives the next human move, then the top-weighted
+	// point.
 	void plan_move()
 	{
 		plan_valid = true;
@@ -847,10 +952,14 @@ namespace
 
 		force_nodes = 0;
 		budget_hit = false;
+		quiet_nodes = 0;
 		Snapshot snap;
 		save(snap);
 		int firstSurvivor = -1;              // best move that does not lose at once
 		size_t rejectedAtOnce = 0;           // rejected[] entries before firstSurvivor
+		int firstNoForced = -1;              // best move that only loses to a quiet threat
+		size_t rejectedForced = 0;           // rejected[] entries before firstNoForced
+		int quietChecked = 0;
 		for (int q : order)
 		{
 			force_nodes++;
@@ -863,12 +972,25 @@ namespace
 				forced_checks++;
 				safe = !human_forced_win(force_depth);
 			}
+			bool quietLoss = false;
+			if (safe && !wins && status == pente::InProgress && use_quiet_check
+				&& quietChecked < quiet_candidates && quiet_nodes <= quiet_budget)
+			{
+				quietChecked++;
+				quietLoss = human_quiet_win();
+			}
 			restore(snap);
-			if (safe)
+			if (safe && !quietLoss)
 			{
 				planned_pt = q + 1;
 				plan_valid = true;
 				return;
+			}
+			if (quietLoss) quiet_rejections++;
+			if (safe && firstNoForced < 0)
+			{
+				firstNoForced = q;
+				rejectedForced = rejected.size();
 			}
 			if (survives && firstSurvivor < 0)
 			{
@@ -877,8 +999,14 @@ namespace
 			}
 			rejected.push_back(q);
 		}
-		// Everything loses. Prefer a move that survives the next human move.
-		if (firstSurvivor >= 0)
+		// Everything loses. Prefer a move that only loses to a quiet threat,
+		// then one that survives the next human move.
+		if (firstNoForced >= 0)
+		{
+			planned_pt = firstNoForced + 1;
+			rejected.resize(rejectedForced);
+		}
+		else if (firstSurvivor >= 0)
 		{
 			planned_pt = firstSurvivor + 1;
 			rejected.resize(rejectedAtOnce);

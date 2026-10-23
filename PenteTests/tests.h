@@ -135,6 +135,7 @@ static void test_safety_check()
 	// only when a move that does not lose at once exists.
 	int saved = force_depth;
 	force_depth = 0;
+	use_quiet_check = false;
 	srand(5);
 	int positions = 0, saves = 0;
 	for (int trial = 0; trial < 3000; trial++)
@@ -155,12 +156,15 @@ static void test_safety_check()
 		else CHECK(plan == top && RejectedMoves().empty());
 	}
 	force_depth = saved;
+	use_quiet_check = true;
 	printf("  %d random positions, %d saved by the one-move check\n", positions, saves);
 	CHECK(saves > 0);
 }
 
 static void test_search()
 {
+	// The four-based search on its own; test_quiet_check covers quiet threats.
+	use_quiet_check = false;
 	auto planned = []() { int r, c; PlannedMove(r, c); return r * N + c; };
 
 	// capture threat + open three: block the three, not the pair
@@ -222,6 +226,50 @@ static void test_search()
 	}
 	printf("  %d plans, average %.1f ms, slowest %.0f ms\n", plans, total / plans, worst);
 	CHECK(worst < 600);
+	use_quiet_check = true;
+}
+
+static void test_quiet_check()
+{
+	// A double-three fork: H7 would give the human two open threes (F7 G7 H7
+	// and H5 H6 H7) at once.
+	for (bool captures : { false, true })
+	{
+		Reset(captures);
+		put("F7", Human); put("B2", Computer); put("G7", Human); put("B12", Computer);
+		put("H5", Human); put("L2", Computer); put("H6", Human); put("L12", Computer);
+		CHECK(quiet_after(Q("A13")));      // ignoring the fork loses
+		CHECK(!quiet_after(Q("H7")));      // taking the fork point holds
+		int r, c;
+		PlannedMove(r, c);
+		int plan = r * N + c;
+		CHECK(!quiet_after(plan));
+		printf("  double three, captures %s: computer plays %s\n", captures ? "on" : "off", nm(plan).c_str());
+	}
+
+	// A single open three is not a quiet win: one block holds it.
+	Reset(false);
+	put("F7", Human); put("B2", Computer); put("G7", Human); put("B12", Computer);
+	CHECK(!quiet_after(Q("A13")));
+
+	// Speed on random positions.
+	srand(29);
+	double worst = 0, total = 0;
+	int plans = 0, quietRejected = 0;
+	for (int trial = 0; trial < 1500; trial++)
+	{
+		random_position();
+		if (!usable_position()) continue;
+		int before = quiet_rejections;
+		auto t0 = std::chrono::steady_clock::now();
+		computer_pt();
+		double ms = ms_since(t0);
+		worst = std::max(worst, ms); total += ms; plans++;
+		if (quiet_rejections > before) quietRejected++;
+	}
+	printf("  %d plans, average %.1f ms, slowest %.0f ms; quiet threats changed the move in %d\n",
+		plans, total / plans, worst, quietRejected);
+	CHECK(worst < 1000);
 }
 
 static void test_no_capture_games()
@@ -246,7 +294,7 @@ static void test_no_capture_games()
 				{
 					overrides++;
 					force_nodes = 0;
-					CHECK(loses_at_once(original) || forced_after(original, force_depth));
+					CHECK(loses_at_once(original) || forced_after(original, force_depth) || quiet_after(original));
 				}
 			}
 			int q = choose_for(side, d);
@@ -323,6 +371,7 @@ static int run_tests()
 		{ "capture weights", test_capture_weights },
 		{ "one-move safety check", test_safety_check },
 		{ "forcing-sequence search", test_search },
+		{ "quiet-threat check", test_quiet_check },
 		{ "games without captures", test_no_capture_games },
 		{ "game logs", test_game_logs },
 		{ "self-play", test_selfplay },

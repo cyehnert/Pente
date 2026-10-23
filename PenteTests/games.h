@@ -143,26 +143,54 @@ static std::string result_text()
 }
 
 // Settings for "deep" analysis: a longer forcing search than live play uses.
+// Settings for "deep" analysis: longer forcing and quiet-threat searches than
+// live play uses.
 struct DeepSearch
 {
 	int depth;
 	long budget;
-	int savedDepth;
-	long savedBudget;
-	DeepSearch(int d = 5, long b = 400000) : depth(d), budget(b), savedDepth(force_depth), savedBudget(force_budget)
+	int savedDepth, savedQuietDepth;
+	long savedBudget, savedQuietBudget, savedQuietCall;
+	DeepSearch(int d = 5, long b = 400000)
+		: depth(d), budget(b), savedDepth(force_depth), savedQuietDepth(quiet_inner_depth),
+		  savedBudget(force_budget), savedQuietBudget(quiet_budget), savedQuietCall(quiet_call_budget)
 	{
 		force_depth = d;
 		force_budget = b;
+		quiet_inner_depth = 3;
+		quiet_budget = 400000;
+		quiet_call_budget = 20000;
 	}
-	~DeepSearch() { force_depth = savedDepth; force_budget = savedBudget; }
+	~DeepSearch()
+	{
+		force_depth = savedDepth;
+		force_budget = savedBudget;
+		quiet_inner_depth = savedQuietDepth;
+		quiet_budget = savedQuietBudget;
+		quiet_call_budget = savedQuietCall;
+	}
 };
 
-// With the computer to move: does playing q lose by force (deep search)?
+// After the computer plays q, does the human have a quiet move that wins by force?
+static bool quiet_after(int q)
+{
+	Snapshot s;
+	save(s);
+	place_stone(q + 1, Computer);
+	quiet_nodes = 0;
+	bool r = status == InProgress && human_quiet_win();
+	restore(s);
+	return r;
+}
+
+// With the computer to move: does playing q lose by force (deep search,
+// including quiet threats)?
 static bool deep_loses(int q)
 {
 	if (loses_at_once(q)) return true;
 	force_nodes = 0;
-	return forced_after(q, force_depth);
+	if (forced_after(q, force_depth)) return true;
+	return quiet_after(q);
 }
 
 // Best move that does not lose by force (deep search), trying moves in weight
