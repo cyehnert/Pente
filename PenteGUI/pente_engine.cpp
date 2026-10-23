@@ -1,7 +1,8 @@
 // Pente engine: the solution/weight algorithm from Pente_main.cpp with the
 // console menu removed. The evaluation routines (init_*, eval_s, eval_w,
 // updat_w, selec_pt, updat_cs, cp_check, num_cs) are unchanged apart from
-// living in an unnamed namespace, so the computer plays exactly as before.
+// living in an unnamed namespace and taking their values from LineParams
+// (still the original values).
 //
 // Optional capture rules: removing captured stones can reopen five-in-a-row
 // lines, which the incremental updates cannot express, so after a capture the
@@ -10,13 +11,13 @@
 //
 // With capture rules on, the computer also keeps a parallel set of capture
 // weights (cw) and plays the empty point with the highest w + cw. The original
-// weights w are never changed by this, so games without captures play exactly
-// as before.
+// weights w are never changed by this.
 //
-// Also with capture rules on, the computer checks its candidate moves before
-// playing: it skips a move if the human could then win at once (five in a row
-// or a fifth capture), or could force a win with a short series of fours and
-// capture-win threats, e.g. a four plus an open three. See plan_move.
+// In every game the computer checks its candidate moves before playing: it
+// skips a move if the human could then win at once (five in a row or a fifth
+// capture), or could force a win with a short series of fours and capture-win
+// threats, e.g. a four plus an open three. Otherwise it plays the highest-
+// weighted point, as the original program did. See plan_move.
 #include "pente_engine.h"
 #include <algorithm>
 
@@ -49,6 +50,29 @@ namespace
 	std::vector<pente::Move> history;
 
 	void updat_w(int);
+
+	// The values updat_w gives each solution array through a point, by how many
+	// stones of one side it holds. The original values are kept for games with
+	// capture rules; games without captures use a separate set so it can be
+	// tuned on its own (PenteTests tune-lines).
+	struct LineParams
+	{
+		int opp4 = 1500;     // opponent with 4
+		int opp3 = 50;       // opponent with 3
+		int opp2 = 26;       // opponent with 2
+		int opp1 = 4;        // opponent with 1
+		int vacant = 5;      // vacant solution array
+		int own1 = 6;        // computer with 1
+		int own2 = 29;       // computer with 2
+		int own3 = 45;       // computer with 3
+		int own4 = 100001;   // computer with 4
+		int opp3_twice = 50;     // point in two opponent threes
+		int own3_twice = 1000;   // point in two computer threes
+	};
+	LineParams line_capture;     // games with capture rules (original values)
+	LineParams line_plain;       // games without capture rules
+
+	const LineParams& line_params() { return capture_rules ? line_capture : line_plain; }
 
 	void init_a()
 	{
@@ -115,7 +139,7 @@ namespace
 
 	void init_w()
 	{
-		for (int i=0;i<N2;i++) w[i] = t[i][0] * 5;
+		for (int i=0;i<N2;i++) w[i] = t[i][0] * line_params().vacant;
 	}
 
 	void init_cp()
@@ -283,6 +307,7 @@ namespace
 	void updat_w(int np)
 	{
 		int ns, k, ks, ws, n3n, n3p;
+		const LineParams& lp = line_params();
 		ns = t[np-1][0];
 		n3n = 0;
 		n3p = 0;
@@ -295,20 +320,20 @@ namespace
 			ws = 5 + sn[ks-1];
 			switch( ws )
 			{
-			case 1: w[np-1] += 1500;   break;  // opponent with 4
-			case 2: w[np-1] += 50;     break;  // opponent with 3
-			case 3: w[np-1] += 26;     break;  // opponent with 2
-			case 4: w[np-1] += 4;      break;  // opponent with 1
-			case 5: w[np-1] += 5;      break;  // vacant solution array
-			case 6: w[np-1] += 6;      break;  // computer with 1
-			case 7: w[np-1] += 29;     break;  // computer with 2
-			case 8: w[np-1] += 45;     break;  // computer with 3
-			case 9: w[np-1] += 100001; break;  // computer with 4
+			case 1: w[np-1] += lp.opp4;   break;  // opponent with 4
+			case 2: w[np-1] += lp.opp3;   break;  // opponent with 3
+			case 3: w[np-1] += lp.opp2;   break;  // opponent with 2
+			case 4: w[np-1] += lp.opp1;   break;  // opponent with 1
+			case 5: w[np-1] += lp.vacant; break;  // vacant solution array
+			case 6: w[np-1] += lp.own1;   break;  // computer with 1
+			case 7: w[np-1] += lp.own2;   break;  // computer with 2
+			case 8: w[np-1] += lp.own3;   break;  // computer with 3
+			case 9: w[np-1] += lp.own4;   break;  // computer with 4
 			default: break;
 			}
 		}
-		if (n3n > 1) w[np-1] += 50;
-		if (n3p > 1) w[np-1] += 1000;
+		if (n3n > 1) w[np-1] += lp.opp3_twice;
+		if (n3p > 1) w[np-1] += lp.own3_twice;
 	}
 
 	// Returns 0 when no vacant point carries any weight (the original read an
@@ -447,14 +472,25 @@ namespace
 	int cw[N2];                          // capture weight of each point
 	bool use_capture_weights = true;     // tests switch this off to compare
 
-	const int CW_WIN_CAPTURE = 100001;   // takes the fifth pair: wins like completing five
-	const int CW_BLOCK_WIN = 2000;       // stops the human taking their fifth pair
-	const int CW_CAPTURE = 300;          // per pair taken
-	const int CW_BLOCK = 250;            // per own pair saved from capture
-	const int CW_PER_CAPTURE = 50;       // added per pair the player already holds
-	const int CW_THREAT = 30;            // sets up X O O _ (a capture threat)
-	const int CW_EXPOSE = 300;           // forms own pair open to capture (O X X _)
-	const int CW_EXPOSE_LOSS = 5000;     // ... when that pair would be the human's fifth
+	// The capture-weight values. They are variables so the tuner in PenteTests
+	// can try other values; these defaults are what the game uses.
+	struct CaptureParams
+	{
+		int win_capture = 100001;   // takes the fifth pair: wins like completing five
+		int block_win = 2000;       // stops the human taking their fifth pair
+		int capture = 300;          // per pair taken
+		int block = 250;            // per own pair saved from capture
+		int per_capture = 50;       // added per pair the player already holds
+		int threat = 30;            // sets up X O O _ (a capture threat)
+		int expose = 300;           // forms own pair open to capture (O X X _)
+		int expose_loss = 5000;     // ... when that pair would be the human's fifth
+		int break_four = 1500;      // capture breaks a human four (the updat_w value)
+		int break_three = 50;       // ... a human three
+		int break_two = 26;         // ... a human two
+		int keep_three = 100;       // saved pair keeps a computer three
+		int keep_two = 30;          // ... a computer two
+	};
+	CaptureParams params;
 
 	const int OFF_BOARD = 2;
 
@@ -473,8 +509,8 @@ namespace
 			int v = sn[t[s][k]-1] * owner;   // stones of `owner` in an unblocked line
 			if (v < 0 || v > 5) continue;
 			int value = owner == pente::Human
-				? (v >= 4 ? 1500 : v == 3 ? 50 : v == 2 ? 26 : 0)    // breaking the human's line
-				: (v >= 3 ? 100 : v == 2 ? 30 : 0);                  // keeping the computer's line
+				? (v >= 4 ? params.break_four : v == 3 ? params.break_three : v == 2 ? params.break_two : 0)
+				: (v >= 3 ? params.keep_three : v == 2 ? params.keep_two : 0);
 			if (value > best) best = value;
 		}
 		return best;
@@ -514,19 +550,19 @@ namespace
 		int value = 0;
 		if (take)
 		{
-			if (captures_c + take >= pente::CapturesToWin) value += CW_WIN_CAPTURE;
-			else value += take * (CW_CAPTURE + CW_PER_CAPTURE * captures_c) + takeLine;
+			if (captures_c + take >= pente::CapturesToWin) value += params.win_capture;
+			else value += take * (params.capture + params.per_capture * captures_c) + takeLine;
 		}
 		if (save)
 		{
-			if (captures_h + save >= pente::CapturesToWin) value += CW_BLOCK_WIN;
-			else value += save * (CW_BLOCK + CW_PER_CAPTURE * captures_h) + saveLine;
+			if (captures_h + save >= pente::CapturesToWin) value += params.block_win;
+			else value += save * (params.block + params.per_capture * captures_h) + saveLine;
 		}
-		value += threats * CW_THREAT;
+		value += threats * params.threat;
 		if (exposed)
 		{
-			if (captures_h + 1 >= pente::CapturesToWin) value -= CW_EXPOSE_LOSS;
-			else value -= exposed * (CW_EXPOSE + CW_PER_CAPTURE * captures_h);
+			if (captures_h + 1 >= pente::CapturesToWin) value -= params.expose_loss;
+			else value -= exposed * (params.expose + params.per_capture * captures_h);
 		}
 		cw[q] = value;
 	}
@@ -599,13 +635,14 @@ namespace
 	// One-ply safety check (capture rules only).
 
 	bool use_safety_check = true;        // tests switch this off to compare
+	bool search_without_captures = true;  // check moves in games without captures too (off: original choice)
 	bool plan_valid = false;
 	int planned_pt = 0;                  // 1-based point, 0 = no move
 	std::vector<int> rejected;           // higher-weighted points skipped as losing
 
 	// Forcing-sequence search limits.
 	int force_depth = 3;                 // human forcing moves looked through (tests vary it)
-	const long FORCE_BUDGET = 20000;     // stones placed per plan (about 0.3 s at most)
+	long force_budget = 20000;           // stones placed per plan (about 0.3 s at most; analysis raises it)
 	long force_nodes = 0;
 	int forced_checks = 0;               // statistics for tests
 	bool budget_hit = false;
@@ -750,9 +787,9 @@ namespace
 	bool human_forced_win(int depth)
 	{
 		if (!win_points(pente::Human).empty()) return true;
-		if (depth == 0 || force_nodes > FORCE_BUDGET)
+		if (depth == 0 || force_nodes > force_budget)
 		{
-			if (force_nodes > FORCE_BUDGET) budget_hit = true;
+			if (force_nodes > force_budget) budget_hit = true;
 			return false;
 		}
 		Snapshot before;
@@ -802,7 +839,7 @@ namespace
 		plan_valid = true;
 		rejected.clear();
 		planned_pt = choose_pt();
-		if (!capture_rules || !use_capture_weights || !use_safety_check || planned_pt == 0) return;
+		if ((!capture_rules && !search_without_captures) || !use_capture_weights || !use_safety_check || planned_pt == 0) return;
 
 		std::vector<int> order;
 		for (int i=0;i<N2;i++) if (!p[i]) order.push_back(i);
@@ -821,7 +858,7 @@ namespace
 			bool wins = status == pente::ComputerWins;
 			bool survives = wins || status == pente::Tie || (status == pente::InProgress && !human_wins_next());
 			bool safe = survives;
-			if (survives && !wins && status == pente::InProgress && force_nodes <= FORCE_BUDGET)
+			if (survives && !wins && status == pente::InProgress && force_nodes <= force_budget)
 			{
 				forced_checks++;
 				safe = !human_forced_win(force_depth);
