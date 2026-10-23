@@ -182,6 +182,46 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
+	if (cmd == "quiet-match")
+	{
+		// Side A uses the quiet-threat check, side B does not; with and without
+		// capture rules.
+		int count = argc > 2 ? atoi(argv[2]) : 150;
+		std::vector<Opening> openings = make_openings(count, 6006);
+		for (bool captures : { true, false })
+		{
+			Player d = engine_player(captures);
+			MatchResult m;
+			double slowest = 0;
+			auto t0 = std::chrono::steady_clock::now();
+			for (const Opening& o : openings)
+				for (int aIsX = 0; aIsX <= 1; aIsX++)
+				{
+					Reset(captures);
+					Owner side = o.first;
+					for (int q : o.points) { place(q + 1, side); side = side == Computer ? Human : Computer; }
+					while (status == InProgress && history.size() < (size_t)N2)
+					{
+						bool sideIsA = (side == Computer) == (aIsX == 1);
+						use_quiet_check = sideIsA;
+						auto t1 = std::chrono::steady_clock::now();
+						int q = choose_for(side, d);
+						if (sideIsA) slowest = std::max(slowest, ms_since(t1));
+						if (q < 0) { status = Tie; break; }
+						place(q + 1, side);
+						side = side == Computer ? Human : Computer;
+					}
+					use_quiet_check = true;
+					bool aWon = (status == ComputerWins) == (aIsX == 1) && status != Tie && status != InProgress;
+					bool bWon = !aWon && (status == ComputerWins || status == HumanWins);
+					if (aWon) m.aWins++; else if (bWon) m.bWins++; else m.ties++;
+				}
+			printf("captures %-3s: quiet check vs without: %d-%d-%d (%.1f%%), slowest move %.0f ms, %.0f s\n",
+				captures ? "on" : "off", m.aWins, m.bWins, m.ties, 100 * m.score(), slowest, ms_since(t0) / 1000);
+		}
+		return 0;
+	}
+
 	if (cmd == "tune")
 	{
 		int rounds = argc > 2 ? atoi(argv[2]) : 3;
